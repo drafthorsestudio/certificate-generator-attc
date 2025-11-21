@@ -3,7 +3,7 @@
 Plugin Name: Course Certificate Generator - Roles-based version
 Plugin URI: https://drafthorsestudio.com/plugins/
 Description: Generate and email course completion certificates for custom post type "training".
-Version: 1.1c custom role
+Version: 1.2 custom for ATTC
 Author: Adam Murray
 Author URI: https://drafthorsestudio.com/
 License: GPL2
@@ -14,7 +14,11 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-
+function log_memory_usage($location) {
+    $memory_usage = memory_get_usage(true);
+    $memory_peak = memory_get_peak_usage(true);
+    error_log("Memory at {$location}: Current=" . size_format($memory_usage) . ", Peak=" . size_format($memory_peak));
+}
 
 // Define role to group term mapping so it can be modified easily
 $role_group_mapping = array(
@@ -39,7 +43,19 @@ add_action('plugins_loaded', 'course_certificate_include_fpdf');
 
 // Generate PDF certificate
 function generate_course_certificate($name, $course_name, $course_id, $attendee_hours = '', $attendee_credentials = '', $attendee_ches = '') {
+
+    log_memory_usage('start_certificate_generation');
+
+    // Clear any existing FPDF instances
+    if (isset($pdf)) {
+        unset($pdf);
+    }
     
+    // Force garbage collection before creating PDF
+    if (function_exists('gc_collect_cycles')) {
+        gc_collect_cycles();
+    }
+
 	//get fields
 	$course_name = str_replace("&#8217;", "'", $course_name);
     $page_width = 279.4;
@@ -74,9 +90,11 @@ function generate_course_certificate($name, $course_name, $course_id, $attendee_
 	$pdf->SetRightMargin(15);
     $pdf->AddPage();
     if (!empty($certificate_background)) {
-        $pdf->Image($certificate_background, 0, 0, $page_width, $page_height);
+        // Verify image exists and is readable before adding
+        if (file_exists($certificate_background) && is_readable($certificate_background)) {
+            $pdf->Image($certificate_background, 0, 0, $page_width, $page_height);
+        }
     }
-
     $pdf->SetFont('Arial', 'B', 24);
     $pdf->SetXY(0, $name_position);
     $pdf->Cell($page_width, 0, $name, 0, 1, 'C');
@@ -132,7 +150,15 @@ function generate_course_certificate($name, $course_name, $course_id, $attendee_
 
     $pdf->Output('F', $file_path);
 
+    // Explicitly clean up
+    unset($pdf);
+    if (function_exists('gc_collect_cycles')) {
+        gc_collect_cycles();
+    }
+
     return $file_path;
+
+    log_memory_usage('end_certificate_generation');
 }
 
 // add_filter( 'wp_mail_from', function( $email ) {
@@ -140,7 +166,8 @@ function generate_course_certificate($name, $course_name, $course_id, $attendee_
 // } );
 
 // Send the certificate via email
-function send_certificate_email($name, $email, $course_name, $course_id, $attendee_hours = '', $attendee_credentials = '', $attendee_ches = '', $course_center) {
+function send_certificate_email($name, $email, $course_name, $course_id, $course_center, $attendee_hours = '', $attendee_credentials = '', $attendee_ches = '') {
+
     $pdf_path = generate_course_certificate($name, $course_name, $course_id, $attendee_hours, $attendee_credentials, $attendee_ches);
 
     // Get email subject from ACF field, fallback to default if not set
@@ -472,6 +499,29 @@ function certificate_generator_admin_page_content() {
 add_action('wp_ajax_send_certificates', 'send_certificates_via_ajax');
 
 function send_certificates_via_ajax() {
+
+    // Limit concurrent processing
+    $max_concurrent = 1; // Process one at a time
+    $start_index = isset($_POST['start_index']) ? intval($_POST['start_index']) : 0;
+    
+    // Add memory checking
+    $memory_usage = memory_get_usage(true);
+    $memory_limit = wp_convert_hr_to_bytes(ini_get('memory_limit'));
+    
+    if ($memory_usage > ($memory_limit * 0.8)) {
+        wp_send_json_error('Memory usage too high. Please try again.');
+        return;
+    }
+
+    // Early termination and better state management
+    if (wp_cache_get('certificate_processing_' . $_POST['course_id'])) {
+        wp_send_json_error('Certificate generation already in progress for this course');
+        return;
+    }
+    
+    // Set processing flag
+    wp_cache_set('certificate_processing_' . $_POST['course_id'], true, '', 300); // 5 minute timeout
+    
     $course_id = intval($_POST['course_id']);
     $start_index = isset($_POST['start_index']) ? intval($_POST['start_index']) : 0;
     $attendee_selection = isset($_POST['attendee_selection']) ? $_POST['attendee_selection'] : 'all';
@@ -524,6 +574,7 @@ function send_certificates_via_ajax() {
     	$course_center = $group_terms[0]->name;
 	}
     $send_result = send_certificate_email($name, $email, $course_name, $course_id, $hours, $credentials, $ches, $course_center);
+    
 
     if (!$send_result) {
         $error_message = "Failed to send certificate to {$email}";
@@ -551,6 +602,8 @@ function send_certificates_via_ajax() {
             'current_recipient' => $email
         ));
     }
+
+    wp_cache_delete('certificate_processing_' . $_POST['course_id']);
 }
 
 // Add AJAX handler for CSV upload
