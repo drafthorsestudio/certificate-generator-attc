@@ -156,9 +156,10 @@ function generate_course_certificate($name, $course_name, $course_id, $attendee_
         gc_collect_cycles();
     }
 
+    log_memory_usage('end_certificate_generation');
+
     return $file_path;
 
-    log_memory_usage('end_certificate_generation');
 }
 
 // add_filter( 'wp_mail_from', function( $email ) {
@@ -500,35 +501,35 @@ add_action('wp_ajax_send_certificates', 'send_certificates_via_ajax');
 
 function send_certificates_via_ajax() {
 
-    // Limit concurrent processing
-    $max_concurrent = 1; // Process one at a time
-    $start_index = isset($_POST['start_index']) ? intval($_POST['start_index']) : 0;
+    $course_id = intval($_POST['course_id']);
+    $cache_key = 'certificate_processing_' . $course_id;
+    
+    // Check for existing processing
+    if (wp_cache_get($cache_key)) {
+        wp_send_json_error('Certificate generation already in progress for this course');
+        return;
+    }
+    
+    // Set processing flag
+    wp_cache_set($cache_key, true, '', 300);
     
     // Add memory checking
     $memory_usage = memory_get_usage(true);
     $memory_limit = wp_convert_hr_to_bytes(ini_get('memory_limit'));
     
     if ($memory_usage > ($memory_limit * 0.8)) {
+        wp_cache_delete($cache_key); // Clean up before error
         wp_send_json_error('Memory usage too high. Please try again.');
         return;
     }
-
-    // Early termination and better state management
-    if (wp_cache_get('certificate_processing_' . $_POST['course_id'])) {
-        wp_send_json_error('Certificate generation already in progress for this course');
-        return;
-    }
     
-    // Set processing flag
-    wp_cache_set('certificate_processing_' . $_POST['course_id'], true, '', 300); // 5 minute timeout
-    
-    $course_id = intval($_POST['course_id']);
     $start_index = isset($_POST['start_index']) ? intval($_POST['start_index']) : 0;
     $attendee_selection = isset($_POST['attendee_selection']) ? $_POST['attendee_selection'] : 'all';
     
     $attendees = get_field('attendees', $course_id);
     
     if (!$attendees) {
+        wp_cache_delete($cache_key); // Clean up before error
         wp_send_json_error('No attendees found for this training.');
         return;
     }
@@ -573,7 +574,8 @@ function send_certificates_via_ajax() {
 	if (!is_wp_error($group_terms) && !empty($group_terms)) {
     	$course_center = $group_terms[0]->name;
 	}
-    $send_result = send_certificate_email($name, $email, $course_name, $course_id, $hours, $credentials, $ches, $course_center);
+    
+    $send_result = send_certificate_email($name, $email, $course_name, $course_id, $course_center, $hours, $credentials, $ches);
     
 
     if (!$send_result) {
@@ -581,12 +583,14 @@ function send_certificates_via_ajax() {
         if (isset($phpmailer) && is_object($phpmailer) && !empty($phpmailer->ErrorInfo)) {
             $error_message .= ": " . $phpmailer->ErrorInfo;
         }
+        wp_cache_delete($cache_key); // Clean up before error
         wp_send_json_error($error_message);
         return;
     }
 
-    // For a single attendee, we need to set is_complete to true immediately
+    // Success responses
     if ($attendee_selection !== 'all') {
+        wp_cache_delete($cache_key); // Clean up on completion
         wp_send_json_success(array(
             'is_complete' => true,
             'emails_sent' => 1,
@@ -594,16 +598,19 @@ function send_certificates_via_ajax() {
             'current_recipient' => $email
         ));
     } else {
-        // For "All" selection, check if we've processed all attendees
+        // Don't clean cache yet for "all" - processing continues
         wp_send_json_success(array(
-            'is_complete' => false,
+            'is_complete' => ($start_index + 1 >= $total_attendees),
             'emails_sent' => $start_index + 1,
             'total_attendees' => $total_attendees,
             'current_recipient' => $email
         ));
+        
+        // Clean cache only when all processing is complete
+        if ($start_index + 1 >= $total_attendees) {
+            wp_cache_delete($cache_key);
+        }
     }
-
-    wp_cache_delete('certificate_processing_' . $_POST['course_id']);
 }
 
 // Add AJAX handler for CSV upload
