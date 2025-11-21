@@ -3,7 +3,7 @@
 Plugin Name: Course Certificate Generator - Roles-based version
 Plugin URI: https://drafthorsestudio.com/plugins/
 Description: Generate and email course completion certificates for custom post type "training".
-Version: 1.2 custom for ATTC
+Version: 1.3 custom for ATTC - Fixed background images and batch processing
 Author: Adam Murray
 Author URI: https://drafthorsestudio.com/
 License: GPL2
@@ -89,12 +89,46 @@ function generate_course_certificate($name, $course_name, $course_id, $attendee_
 	$pdf->SetLeftMargin(15);
 	$pdf->SetRightMargin(15);
     $pdf->AddPage();
+
+    // FIXED: Better background image handling
     if (!empty($certificate_background)) {
-        // Verify image exists and is readable before adding
-        if (file_exists($certificate_background) && is_readable($certificate_background)) {
-            $pdf->Image($certificate_background, 0, 0, $page_width, $page_height);
+        // Handle both URL and local path formats
+        if (is_array($certificate_background)) {
+            // ACF returns array format
+            $image_url = $certificate_background['url'];
+            $image_path = isset($certificate_background['path']) ? $certificate_background['path'] : '';
+        } else {
+            // ACF returns URL string
+            $image_url = $certificate_background;
+            $image_path = '';
+        }
+        
+        // Try local path first (faster), then URL
+        if (!empty($image_path) && file_exists($image_path) && is_readable($image_path)) {
+            $pdf->Image($image_path, 0, 0, $page_width, $page_height);
+            error_log('Certificate background added from local path: ' . $image_path);
+        } elseif (!empty($image_url)) {
+            // Convert URL to local path if it's a WordPress upload
+            $upload_dir = wp_upload_dir();
+            $local_path = str_replace($upload_dir['baseurl'], $upload_dir['basedir'], $image_url);
+            
+            if (file_exists($local_path) && is_readable($local_path)) {
+                $pdf->Image($local_path, 0, 0, $page_width, $page_height);
+                error_log('Certificate background added from converted URL path: ' . $local_path);
+            } else {
+                // Fallback to URL (requires allow_url_fopen)
+                if (ini_get('allow_url_fopen')) {
+                    $pdf->Image($image_url, 0, 0, $page_width, $page_height);
+                    error_log('Certificate background added from URL: ' . $image_url);
+                } else {
+                    error_log('Certificate background image not accessible and allow_url_fopen disabled: ' . $image_url);
+                }
+            }
+        } else {
+            error_log('Certificate background field is empty or invalid');
         }
     }
+
     $pdf->SetFont('Arial', 'B', 24);
     $pdf->SetXY(0, $name_position);
     $pdf->Cell($page_width, 0, $name, 0, 1, 'C');
@@ -117,7 +151,7 @@ function generate_course_certificate($name, $course_name, $course_id, $attendee_
 
     $pdf->SetXY(0, $misc_text_position);
     $pdf->SetFont('Arial', '', 12);
-    $pdf->Cell($page_width, 0, !empty($misc_text_position) ? "".$certificate_misc_text : "", 0, 1, 'C');
+    $pdf->Cell($page_width, 0, !empty($certificate_misc_text) ? $certificate_misc_text : "", 0, 1, 'C');
 
     $pdf->SetXY(0, $date_position);
     $pdf->SetFont('Arial', '', 16);
@@ -162,10 +196,6 @@ function generate_course_certificate($name, $course_name, $course_id, $attendee_
 
 }
 
-// add_filter( 'wp_mail_from', function( $email ) {
-// 	return 'info@ctcsrh.org';
-// } );
-
 // Send the certificate via email
 function send_certificate_email($name, $email, $course_name, $course_id, $course_center, $attendee_hours = '', $attendee_credentials = '', $attendee_ches = '') {
 
@@ -180,17 +210,18 @@ function send_certificate_email($name, $email, $course_name, $course_id, $course
 	$message = "Thank you for participating in $course_name, hosted by the $course_center.<br/>";
 	$message .= "Attached is your certificate, awarded for attending the training.<br/>Please keep this certificate for your records.<br/><br/>If you have any questions or require additional support, feel free to reach out to us.<br/>";
 	$message .= "You can contact your regional center that awarded your certificate or <a href='https://attcnetwork.org/find-your-center/'>find them here</a>.";
- 	//$message = "Hello $name,<br/><br/>Congratulations on completing the $course_name course. We have attached your certificate to this email.";
-    //$message .= "<br/>You can find this certificate is also available at CTCSRH.org. You may <a href='https://ctcsrh.org/log-in/'>log in here</a> to view this and any of your other certificates.";
-    //$message .= "<br/>If you do not have an account, <a href='https://ctcsrh.org/register/'>create one</a> using this email address, and you will have access to your certificates and other useful tools.";
+    
     $headers = array('Content-Type: text/html; charset=UTF-8');
-
     $attachments = array($pdf_path);
 
-    // error_log("Attempting to send email to: " . $email . " with subject: " . $subject);
+    error_log("Attempting to send email to: " . $email . " with subject: " . $subject);
     $result = wp_mail($email, $subject, $message, $headers, $attachments);
 
-    // unlink($pdf_path);
+    if ($result) {
+        error_log("Successfully sent certificate to: " . $email);
+    } else {
+        error_log("Failed to send certificate to: " . $email);
+    }
 
     return $result;
 }
@@ -220,7 +251,6 @@ function add_certificate_generator_admin_page() {
     );    
 }
 add_action('admin_menu', 'add_certificate_generator_admin_page');
-
 
 function certificate_generator_admin_page_content() {
     ?>
@@ -292,10 +322,6 @@ function certificate_generator_admin_page_content() {
                 </select>
                 <?php
 
-                // $user_id = get_current_user_id();
-                // $user_groups = pp_get_groups_for_user( $user_id );
-                // echo '<pre>'; print_r($user_groups); echo '</pre>';
-
                 if (isset($_GET['debug']) && $_GET['debug'] == '1') {
                     echo 'Current PublishPress roles: ';
                     foreach ( $current_user_groups as $item ) {
@@ -303,7 +329,6 @@ function certificate_generator_admin_page_content() {
                     }
                     $user = wp_get_current_user();
                     echo '<p>Has manage_certificates role: ' . (current_user_can('manage_certificates') ? 'YES' : 'NO') . '</p>';
-                    // echo '<pre>User capabilities: ' . print_r($user->allcaps, true) . '</pre>';
                 }
                 ?>
             </div>
@@ -496,40 +521,42 @@ function certificate_generator_admin_page_content() {
     <?php
 }
 
-// AJAX handler for sending certificates
+// AJAX handler for sending certificates - FIXED for proper batch processing
 add_action('wp_ajax_send_certificates', 'send_certificates_via_ajax');
 
 function send_certificates_via_ajax() {
 
     $course_id = intval($_POST['course_id']);
-    $cache_key = 'certificate_processing_' . $course_id;
+    $start_index = isset($_POST['start_index']) ? intval($_POST['start_index']) : 0;
+    $attendee_selection = isset($_POST['attendee_selection']) ? $_POST['attendee_selection'] : 'all';
     
-    // Check for existing processing
-    if (wp_cache_get($cache_key)) {
-        wp_send_json_error('Certificate generation already in progress for this course');
-        return;
+    // Use transient instead of cache for better reliability
+    $lock_key = 'cert_lock_' . $course_id;
+    
+    // Only check lock on first request (start_index = 0)
+    if ($start_index === 0) {
+        if (get_transient($lock_key)) {
+            wp_send_json_error('Certificate generation already in progress for this course');
+            return;
+        }
+        // Set lock for 5 minutes
+        set_transient($lock_key, true, 300);
     }
-    
-    // Set processing flag
-    wp_cache_set($cache_key, true, '', 300);
     
     // Add memory checking
     $memory_usage = memory_get_usage(true);
     $memory_limit = wp_convert_hr_to_bytes(ini_get('memory_limit'));
     
     if ($memory_usage > ($memory_limit * 0.8)) {
-        wp_cache_delete($cache_key); // Clean up before error
+        delete_transient($lock_key); // Clean up before error
         wp_send_json_error('Memory usage too high. Please try again.');
         return;
     }
     
-    $start_index = isset($_POST['start_index']) ? intval($_POST['start_index']) : 0;
-    $attendee_selection = isset($_POST['attendee_selection']) ? $_POST['attendee_selection'] : 'all';
-    
     $attendees = get_field('attendees', $course_id);
     
     if (!$attendees) {
-        wp_cache_delete($cache_key); // Clean up before error
+        delete_transient($lock_key); // Clean up before error
         wp_send_json_error('No attendees found for this training.');
         return;
     }
@@ -543,7 +570,7 @@ function send_certificates_via_ajax() {
             // Reset start_index since we're only processing one attendee
             $start_index = 0;
         } else {
-            wp_cache_delete($cache_key); 
+            delete_transient($lock_key); 
             wp_send_json_error('Selected attendee not found.');
             return;
         }
@@ -552,7 +579,7 @@ function send_certificates_via_ajax() {
     $total_attendees = count($attendees);
     
     if ($start_index >= $total_attendees) {
-        wp_cache_delete($cache_key);
+        delete_transient($lock_key);
         wp_send_json_success(array(
             'is_complete' => true,
             'emails_sent' => $total_attendees
@@ -577,6 +604,8 @@ function send_certificates_via_ajax() {
     	$course_center = $group_terms[0]->name;
 	}
     
+    error_log("Processing certificate {$start_index} of {$total_attendees} for {$name} ({$email})");
+    
     $send_result = send_certificate_email($name, $email, $course_name, $course_id, $course_center, $hours, $credentials, $ches);
     
 
@@ -585,14 +614,14 @@ function send_certificates_via_ajax() {
         if (isset($phpmailer) && is_object($phpmailer) && !empty($phpmailer->ErrorInfo)) {
             $error_message .= ": " . $phpmailer->ErrorInfo;
         }
-        wp_cache_delete($cache_key); // Clean up before error
+        delete_transient($lock_key); // Clean up before error
         wp_send_json_error($error_message);
         return;
     }
 
     // Success responses
     if ($attendee_selection !== 'all') {
-        wp_cache_delete($cache_key); // Clean up on completion
+        delete_transient($lock_key); // Clean up on completion
         wp_send_json_success(array(
             'is_complete' => true,
             'emails_sent' => 1,
@@ -600,17 +629,19 @@ function send_certificates_via_ajax() {
             'current_recipient' => $email
         ));
     } else {
-        // Don't clean cache yet for "all" - processing continues
+        // Check if we've processed all attendees
+        $is_complete = ($start_index + 1 >= $total_attendees);
+        
         wp_send_json_success(array(
-            'is_complete' => ($start_index + 1 >= $total_attendees),
+            'is_complete' => $is_complete,
             'emails_sent' => $start_index + 1,
             'total_attendees' => $total_attendees,
             'current_recipient' => $email
         ));
         
-        // Clean cache only when all processing is complete
-        if ($start_index + 1 >= $total_attendees) {
-            wp_cache_delete($cache_key);
+        // Clean lock only when all processing is complete
+        if ($is_complete) {
+            delete_transient($lock_key);
         }
     }
 }
@@ -775,7 +806,6 @@ function get_course_attendees_via_ajax() {
         'attendees' => $indexed_attendees
     ));
 }
-
 
 function get_current_user_attc_groups( $user_id = null ) {
     global $role_group_mapping;
