@@ -543,6 +543,7 @@ function send_certificates_via_ajax() {
             // Reset start_index since we're only processing one attendee
             $start_index = 0;
         } else {
+            wp_cache_delete($cache_key); 
             wp_send_json_error('Selected attendee not found.');
             return;
         }
@@ -551,6 +552,7 @@ function send_certificates_via_ajax() {
     $total_attendees = count($attendees);
     
     if ($start_index >= $total_attendees) {
+        wp_cache_delete($cache_key);
         wp_send_json_success(array(
             'is_complete' => true,
             'emails_sent' => $total_attendees
