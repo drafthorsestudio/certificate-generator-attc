@@ -35,3 +35,14 @@ v1.2
 
 v1.21
 - Fix: add course id to pdf filename to avoid duplicate files.
+
+v1.3 custom for ATTC
+- Fix: Batch certificate generation now works correctly - all selected attendees receive certificates
+- Fix: Improved memory management with garbage collection and usage monitoring
+- Fix: Added cache/lock mechanism to prevent duplicate certificate generation
+- Fix: Enhanced error logging for better debugging of email delivery issues
+- Fix: Resolved PHP warnings for undefined variables in geolocation functions
+- Improvement: Better handling of ACF image field formats (URL vs array)
+- Improvement: More reliable AJAX processing using transients instead of cache
+- Improvement: Added detailed logging for certificate processing progress
+- Performance: Optimized PDF generation with proper cleanup and memory management
